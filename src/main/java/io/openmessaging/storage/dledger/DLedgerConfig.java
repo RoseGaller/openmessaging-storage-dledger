@@ -20,7 +20,9 @@ package io.openmessaging.storage.dledger;
 import com.beust.jcommander.Parameter;
 import io.openmessaging.storage.dledger.store.file.DLedgerMmapFileStore;
 import java.io.File;
-
+/**
+ * Dledger配置
+ * **/
 public class DLedgerConfig {
 
     public static final String MEMORY = "MEMORY";

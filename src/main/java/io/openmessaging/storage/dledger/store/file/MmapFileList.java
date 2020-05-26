@@ -340,7 +340,6 @@ public class MmapFileList {
 
             return mappedFile;
         }
-
         return mappedFileLast;
     }
 

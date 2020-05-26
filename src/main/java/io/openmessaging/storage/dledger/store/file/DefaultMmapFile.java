@@ -37,9 +37,13 @@ import org.slf4j.LoggerFactory;
 public class DefaultMmapFile extends ReferenceResource implements MmapFile {
     public static final int OS_PAGE_SIZE = 1024 * 4;
     protected static Logger logger = LoggerFactory.getLogger(DefaultMmapFile.class);
+
+    //MappedByteBuffer大小
     private static final AtomicLong TOTAL_MAPPED_VIRTUAL_MEMORY = new AtomicLong(0);
+    //MmapFile文件个数
     private static final AtomicInteger TOTAL_MAPPED_FILES = new AtomicInteger(0);
 
+    //
     final AtomicInteger startPosition = new AtomicInteger(0);
     final AtomicInteger wrotePosition = new AtomicInteger(0);
     final AtomicInteger committedPosition = new AtomicInteger(0);

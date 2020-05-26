@@ -117,6 +117,7 @@ public class DLedgerEntryPusher {
         }
     }
 
+    //修改当前任期内，每个从节点的数据复制索引
     private void updatePeerWaterMark(long term, String peerId, long index) {
         synchronized (peerWaterMarksByTerm) {
             checkTermForWaterMark(term, "updatePeerWaterMark");
@@ -138,6 +139,7 @@ public class DLedgerEntryPusher {
         return pendingAppendResponsesByTerm.get(currTerm).size() > dLedgerConfig.getMaxPendingRequestsNum();
     }
 
+    //等待follower节点的ack
     public CompletableFuture<AppendEntryResponse> waitAck(DLedgerEntry entry) {
         updatePeerWaterMark(entry.getTerm(), memberState.getSelfId(), entry.getIndex());
         if (memberState.getPeerMap().size() == 1) {
@@ -167,6 +169,9 @@ public class DLedgerEntryPusher {
     }
 
     /**
+     *
+     * 检测每个index是否得到半数节点的ack，完成待处理的append任务，返回响应给客户端
+     *
      * This thread will check the quorum index and complete the pending requests.
      */
     private class QuorumAckChecker extends ShutdownAbleThread {
@@ -185,187 +190,208 @@ public class DLedgerEntryPusher {
                 if (DLedgerUtils.elapsed(lastPrintWatermarkTimeMs) > 3000) {
                     logger.info("[{}][{}] term={} ledgerBegin={} ledgerEnd={} committed={} watermarks={}",
                         memberState.getSelfId(), memberState.getRole(), memberState.currTerm(), dLedgerStore.getLedgerBeginIndex(), dLedgerStore.getLedgerEndIndex(), dLedgerStore.getCommittedIndex(), JSON.toJSONString(peerWaterMarksByTerm));
-                    lastPrintWatermarkTimeMs = System.currentTimeMillis();
-                }
-                if (!memberState.isLeader()) {
-                    waitForRunning(1);
-                    return;
-                }
-                long currTerm = memberState.currTerm();
-                checkTermForPendingMap(currTerm, "QuorumAckChecker");
-                checkTermForWaterMark(currTerm, "QuorumAckChecker");
-                if (pendingAppendResponsesByTerm.size() > 1) {
-                    for (Long term : pendingAppendResponsesByTerm.keySet()) {
-                        if (term == currTerm) {
-                            continue;
-                        }
-                        for (Map.Entry<Long, TimeoutFuture<AppendEntryResponse>> futureEntry : pendingAppendResponsesByTerm.get(term).entrySet()) {
-                            AppendEntryResponse response = new AppendEntryResponse();
-                            response.setGroup(memberState.getGroup());
-                            response.setIndex(futureEntry.getKey());
-                            response.setCode(DLedgerResponseCode.TERM_CHANGED.getCode());
-                            response.setLeaderId(memberState.getLeaderId());
-                            logger.info("[TermChange] Will clear the pending response index={} for term changed from {} to {}", futureEntry.getKey(), term, currTerm);
-                            futureEntry.getValue().complete(response);
-                        }
-                        pendingAppendResponsesByTerm.remove(term);
-                    }
-                }
-                if (peerWaterMarksByTerm.size() > 1) {
-                    for (Long term : peerWaterMarksByTerm.keySet()) {
-                        if (term == currTerm) {
-                            continue;
-                        }
-                        logger.info("[TermChange] Will clear the watermarks for term changed from {} to {}", term, currTerm);
-                        peerWaterMarksByTerm.remove(term);
-                    }
-                }
-                Map<String, Long> peerWaterMarks = peerWaterMarksByTerm.get(currTerm);
+                lastPrintWatermarkTimeMs = System.currentTimeMillis();
+            }
+            if (!memberState.isLeader()) {
+                waitForRunning(1);
+                return;
+            }
+            long currTerm = memberState.currTerm();
+            checkTermForPendingMap(currTerm, "QuorumAckChecker");
+            checkTermForWaterMark(currTerm, "QuorumAckChecker");
 
-                List<Long> sortedWaterMarks = peerWaterMarks.values()
-                        .stream()
-                        .sorted(Comparator.reverseOrder())
-                        .collect(Collectors.toList());
-                long quorumIndex = sortedWaterMarks.get(sortedWaterMarks.size() / 2);
-                dLedgerStore.updateCommittedIndex(currTerm, quorumIndex);
-                ConcurrentMap<Long, TimeoutFuture<AppendEntryResponse>> responses = pendingAppendResponsesByTerm.get(currTerm);
-                boolean needCheck = false;
-                int ackNum = 0;
-                if (quorumIndex >= 0) {
-                    for (Long i = quorumIndex; i >= 0; i--) {
-                        try {
-                            CompletableFuture<AppendEntryResponse> future = responses.remove(i);
-                            if (future == null) {
-                                needCheck = lastQuorumIndex != -1 && lastQuorumIndex != quorumIndex && i != lastQuorumIndex;
-                                break;
-                            } else if (!future.isDone()) {
-                                AppendEntryResponse response = new AppendEntryResponse();
-                                response.setGroup(memberState.getGroup());
-                                response.setTerm(currTerm);
-                                response.setIndex(i);
-                                response.setLeaderId(memberState.getSelfId());
-                                response.setPos(((AppendFuture) future).getPos());
-                                future.complete(response);
-                            }
-                            ackNum++;
-                        } catch (Throwable t) {
-                            logger.error("Error in ack to index={} term={}", i, currTerm, t);
-                        }
+            //删除非当前term内的AppendEntryResponse
+            if (pendingAppendResponsesByTerm.size() > 1) {
+                for (Long term : pendingAppendResponsesByTerm.keySet()) {
+                    if (term == currTerm) {
+                        continue;
+                    }
+                    for (Map.Entry<Long, TimeoutFuture<AppendEntryResponse>> futureEntry : pendingAppendResponsesByTerm.get(term).entrySet()) {
+                        AppendEntryResponse response = new AppendEntryResponse();
+                        response.setGroup(memberState.getGroup());
+                        response.setIndex(futureEntry.getKey());
+                        response.setCode(DLedgerResponseCode.TERM_CHANGED.getCode());
+                        response.setLeaderId(memberState.getLeaderId());
+                        logger.info("[TermChange] Will clear the pending response index={} for term changed from {} to {}", futureEntry.getKey(), term, currTerm);
+                        futureEntry.getValue().complete(response);
+                    }
+                    pendingAppendResponsesByTerm.remove(term);
+                }
+            }
+
+            //删除非当前term内的
+            if (peerWaterMarksByTerm.size() > 1) {
+                for (Long term : peerWaterMarksByTerm.keySet()) {
+                    if (term == currTerm) {
+                        continue;
+                    }
+                    logger.info("[TermChange] Will clear the watermarks for term changed from {} to {}", term, currTerm);
+                    peerWaterMarksByTerm.remove(term);
+                }
+            }
+
+            //获取当前任期内，每个节点的复制情况（PeerId:Index）
+            Map<String, Long> peerWaterMarks = peerWaterMarksByTerm.get(currTerm);
+
+            //获取集群内接收到超过半数节点的ack的最大index，quorumIndex之前的数据至少有半数节点复制
+            long quorumIndex = -1;
+            for (Long index : peerWaterMarks.values()) {
+                int num = 0;
+                for (Long another : peerWaterMarks.values()) {
+                    if (another >= index) {
+                        num++;
                     }
                 }
+                //确保接收到超过集群半数节点的ack
+                if (memberState.isQuorum(num) && index > quorumIndex) {
+                    quorumIndex = index;
+                }
+            }
 
-                if (ackNum == 0) {
-                    for (long i = quorumIndex + 1; i < Integer.MAX_VALUE; i++) {
-                        TimeoutFuture<AppendEntryResponse> future = responses.get(i);
-                        if (future == null) {
+            //更新committedIndex（索引小于quorumIndex的数据已经发送到集群内过半的节点上了）
+            dLedgerStore.updateCommittedIndex(currTerm, quorumIndex);
+
+            ConcurrentMap<Long, TimeoutFuture<AppendEntryResponse>> responses = pendingAppendResponsesByTerm.get(currTerm);
+            boolean needCheck = false;
+            int ackNum = 0;
+            if (quorumIndex >= 0) {
+                for (Long i = quorumIndex; i >= 0; i--) {
+                    try {
+                        CompletableFuture<AppendEntryResponse> future = responses.remove(i);
+                        if (future == null) { //可能follower返回的ack很快，但是dLedgerEntryPusher.waitAck执行太慢未将future放入pendingAppendResponsesByTerm
+                            needCheck = lastQuorumIndex != -1 && lastQuorumIndex != quorumIndex && i != lastQuorumIndex;
                             break;
-                        } else if (future.isTimeOut()) {
+                        } else if (!future.isDone()) {
                             AppendEntryResponse response = new AppendEntryResponse();
                             response.setGroup(memberState.getGroup());
-                            response.setCode(DLedgerResponseCode.WAIT_QUORUM_ACK_TIMEOUT.getCode());
                             response.setTerm(currTerm);
                             response.setIndex(i);
                             response.setLeaderId(memberState.getSelfId());
+                            response.setPos(((AppendFuture) future).getPos());
                             future.complete(response);
-                        } else {
-                            break;
                         }
+                        ackNum++;
+                    } catch (Throwable t) {
+                        logger.error("Error in ack to index={}  term={}", i, currTerm, t);
                     }
-                    waitForRunning(1);
                 }
-
-                if (DLedgerUtils.elapsed(lastCheckLeakTimeMs) > 1000 || needCheck) {
-                    updatePeerWaterMark(currTerm, memberState.getSelfId(), dLedgerStore.getLedgerEndIndex());
-                    for (Map.Entry<Long, TimeoutFuture<AppendEntryResponse>> futureEntry : responses.entrySet()) {
-                        if (futureEntry.getKey() < quorumIndex) {
-                            AppendEntryResponse response = new AppendEntryResponse();
-                            response.setGroup(memberState.getGroup());
-                            response.setTerm(currTerm);
-                            response.setIndex(futureEntry.getKey());
-                            response.setLeaderId(memberState.getSelfId());
-                            response.setPos(((AppendFuture) futureEntry.getValue()).getPos());
-                            futureEntry.getValue().complete(response);
-                            responses.remove(futureEntry.getKey());
-                        }
-                    }
-                    lastCheckLeakTimeMs = System.currentTimeMillis();
-                }
-                lastQuorumIndex = quorumIndex;
-            } catch (Throwable t) {
-                DLedgerEntryPusher.logger.error("Error in {}", getName(), t);
-                DLedgerUtils.sleep(100);
             }
+
+            if (ackNum == 0) { // quorumIndex= -1,说明没有一条消息的ack数量超过集群内的半数节点的数量
+                for (long i = quorumIndex + 1; i < Integer.MAX_VALUE; i++) {
+                    TimeoutFuture<AppendEntryResponse> future = responses.get(i);
+                    if (future == null) {
+                        break;
+                    } else if (future.isTimeOut()) { //判断是否等待超时
+                        AppendEntryResponse response = new AppendEntryResponse();
+                        response.setGroup(memberState.getGroup());
+                        response.setCode(DLedgerResponseCode.WAIT_QUORUM_ACK_TIMEOUT.getCode());
+                        response.setTerm(currTerm);
+                        response.setIndex(i);
+                        response.setLeaderId(memberState.getSelfId());
+                        future.complete(response);
+                    } else {
+                        break;
+                    }
+                }
+                waitForRunning(1);
+            }
+
+            //检测时间超过1s或者防止出现LedgerEntryPusher.waitAck执行太慢，没来得及将future放入pendingAppendResponsesByTerm,半数的节点已经返回ack的情况
+            if (DLedgerUtils.elapsed(lastCheckLeakTimeMs) > 1000 || needCheck) {
+                updatePeerWaterMark(currTerm, memberState.getSelfId(), dLedgerStore.getLedgerEndIndex());
+                for (Map.Entry<Long, TimeoutFuture<AppendEntryResponse>> futureEntry : responses.entrySet()) {
+                    if (futureEntry.getKey() < quorumIndex) {
+                        AppendEntryResponse response = new AppendEntryResponse();
+                        response.setGroup(memberState.getGroup());
+                        response.setTerm(currTerm);
+                        response.setIndex(futureEntry.getKey());
+                        response.setLeaderId(memberState.getSelfId());
+                        response.setPos(((AppendFuture) futureEntry.getValue()).getPos());
+                        futureEntry.getValue().complete(response);
+
+                        responses.remove(futureEntry.getKey());
+                    }
+                }
+                lastCheckLeakTimeMs = System.currentTimeMillis();
+            }
+            lastQuorumIndex = quorumIndex;
+        } catch (Throwable t) {
+            DLedgerEntryPusher.logger.error("Error in {}", getName(), t);
+            DLedgerUtils.sleep(100);
         }
     }
+}
 
-    /**
-     * This thread will be activated by the leader.
-     * This thread will push the entry to follower(identified by peerId) and update the completed pushed index to index map.
-     * Should generate a single thread for each peer.
-     * The push has 4 types:
-     *   APPEND : append the entries to the follower
-     *   COMPARE : if the leader changes, the new leader should compare its entries to follower's
-     *   TRUNCATE : if the leader finished comparing by an index, the leader will send a request to truncate the follower's ledger
-     *   COMMIT: usually, the leader will attach the committed index with the APPEND request, but if the append requests are few and scattered,
-     *           the leader will send a pure request to inform the follower of committed index.
-     *
-     *   The common transferring between these types are as following:
-     *
-     *   COMPARE ---- TRUNCATE ---- APPEND ---- COMMIT
-     *   ^                             |
-     *   |---<-----<------<-------<----|
-     *
-     */
-    private class EntryDispatcher extends ShutdownAbleThread {
+/**
+ * This thread will be activated by the leader.
+ * This thread will push the entry to follower(identified by peerId) and update the completed pushed index to index map.
+ * Should generate a single thread for each peer.
+ * The push has 4 types:
+ *   APPEND : append the entries to the follower
+ *   COMPARE : if the leader changes, the new leader should compare its entries to follower's
+ *   TRUNCATE : if the leader finished comparing by an index, the leader will send a request to truncate the follower's ledger
+ *   COMMIT: usually, the leader will attach the committed index with the APPEND request, but if the append requests are few and scattered,
+ *           the leader will send a pure request to inform the follower of committed index.
+ *
+ *   The common transferring between these types are as following:
+ *
+ *   COMPARE ---- TRUNCATE ---- APPEND ---- COMMIT
+ *   ^                             |
+ *   |---<-----<------<-------<----|
+ *
+ */
+private class EntryDispatcher extends ShutdownAbleThread {
 
-        private AtomicReference<PushEntryRequest.Type> type = new AtomicReference<>(PushEntryRequest.Type.COMPARE);
-        private long lastPushCommitTimeMs = -1;
-        private String peerId;
-        private long compareIndex = -1;
-        private long writeIndex = -1;
-        private int maxPendingSize = 1000;
-        private long term = -1;
-        private String leaderId = null;
-        private long lastCheckLeakTimeMs = System.currentTimeMillis();
-        private ConcurrentMap<Long, Long> pendingMap = new ConcurrentHashMap<>();
-        private ConcurrentMap<Long, Pair<Long, Integer>> batchPendingMap = new ConcurrentHashMap<>();
-        private PushEntryRequest batchAppendEntryRequest = new PushEntryRequest();
-        private Quota quota = new Quota(dLedgerConfig.getPeerPushQuota());
+    private AtomicReference<PushEntryRequest.Type> type = new AtomicReference<>(PushEntryRequest.Type.COMPARE);
+    private long lastPushCommitTimeMs = -1;
+    private String peerId;
+    private long compareIndex = -1;
+    private long writeIndex = -1;
+    private int maxPendingSize = 1000;
+    private long term = -1;
+    private String leaderId = null;
+    private long lastCheckLeakTimeMs = System.currentTimeMillis();
+    private ConcurrentMap<Long, Long> pendingMap = new ConcurrentHashMap<>();
+    private ConcurrentMap<Long, Pair<Long, Integer>> batchPendingMap = new ConcurrentHashMap<>();
+    private PushEntryRequest batchAppendEntryRequest = new PushEntryRequest();
+    private Quota quota = new Quota(dLedgerConfig.getPeerPushQuota());
 
-        public EntryDispatcher(String peerId, Logger logger) {
-            super("EntryDispatcher-" + memberState.getSelfId() + "-" + peerId, logger);
-            this.peerId = peerId;
+
+    public EntryDispatcher(String peerId, Logger logger) {
+        super("EntryDispatcher-" + memberState.getSelfId() + "-" + peerId, logger);
+        this.peerId = peerId;
+    }
+
+    private boolean checkAndFreshState() {
+        if (!memberState.isLeader()) {
+            return false;
         }
-
-        private boolean checkAndFreshState() {
-            if (!memberState.isLeader()) {
-                return false;
-            }
-            if (term != memberState.currTerm() || leaderId == null || !leaderId.equals(memberState.getLeaderId())) {
-                synchronized (memberState) {
-                    if (!memberState.isLeader()) {
-                        return false;
-                    }
-                    PreConditions.check(memberState.getSelfId().equals(memberState.getLeaderId()), DLedgerResponseCode.UNKNOWN);
-                    term = memberState.currTerm();
-                    leaderId = memberState.getSelfId();
-                    changeState(-1, PushEntryRequest.Type.COMPARE);
+        if (term != memberState.currTerm() || leaderId == null || !leaderId.equals(memberState.getLeaderId())) {
+            synchronized (memberState) {
+                if (!memberState.isLeader()) {
+                    return false;
                 }
+                PreConditions.check(memberState.getSelfId().equals(memberState.getLeaderId()), DLedgerResponseCode.UNKNOWN);
+                term = memberState.currTerm();
+                leaderId = memberState.getSelfId();
+                changeState(-1, PushEntryRequest.Type.COMPARE);
             }
-            return true;
         }
+        return true;
+    }
 
-        private PushEntryRequest buildPushRequest(DLedgerEntry entry, PushEntryRequest.Type target) {
-            PushEntryRequest request = new PushEntryRequest();
-            request.setGroup(memberState.getGroup());
-            request.setRemoteId(peerId);
-            request.setLeaderId(leaderId);
-            request.setTerm(term);
-            request.setEntry(entry);
-            request.setType(target);
-            request.setCommitIndex(dLedgerStore.getCommittedIndex());
-            return request;
-        }
+    private PushEntryRequest buildPushRequest(DLedgerEntry entry, PushEntryRequest.Type target) {
+        PushEntryRequest request = new PushEntryRequest();
+        request.setGroup(memberState.getGroup());
+        request.setRemoteId(peerId);
+        request.setLeaderId(leaderId);
+        request.setTerm(term);
+        request.setEntry(entry);
+        request.setType(target);
+        request.setCommitIndex(dLedgerStore.getCommittedIndex());
+        return request;
+    }
 
         private void resetBatchAppendEntryRequest() {
             batchAppendEntryRequest.setGroup(memberState.getGroup());
@@ -426,6 +452,7 @@ public class DLedgerEntryPusher {
             lastPushCommitTimeMs = System.currentTimeMillis();
         }
 
+
         private DLedgerEntry getDLedgerEntryForAppend(long index) {
             DLedgerEntry entry;
             try {
@@ -451,38 +478,38 @@ public class DLedgerEntryPusher {
                 lastPushCommitTimeMs = System.currentTimeMillis();
             }
         }
-
-        private void doCheckAppendResponse() throws Exception {
-            long peerWaterMark = getPeerWaterMark(term, peerId);
-            Long sendTimeMs = pendingMap.get(peerWaterMark + 1);
-            if (sendTimeMs != null && System.currentTimeMillis() - sendTimeMs > dLedgerConfig.getMaxPushTimeOutMs()) {
-                logger.warn("[Push-{}]Retry to push entry at {}", peerId, peerWaterMark + 1);
-                doAppendInner(peerWaterMark + 1);
-            }
+    private void doCheckAppendResponse() throws Exception {
+        long peerWaterMark = getPeerWaterMark(term, peerId);
+        Long sendTimeMs = pendingMap.get(peerWaterMark + 1);
+        if (sendTimeMs != null && System.currentTimeMillis() - sendTimeMs > dLedgerConfig.getMaxPushTimeOutMs()) {
+            logger.warn("[Push-{}]Retry to push entry at {}", peerId, peerWaterMark + 1);
+            doAppendInner(peerWaterMark + 1);
         }
+    }
 
-        private void doAppend() throws Exception {
-            while (true) {
-                if (!checkAndFreshState()) {
-                    break;
-                }
-                if (type.get() != PushEntryRequest.Type.APPEND) {
-                    break;
-                }
-                if (writeIndex > dLedgerStore.getLedgerEndIndex()) {
-                    doCommit();
-                    doCheckAppendResponse();
-                    break;
-                }
-                if (pendingMap.size() >= maxPendingSize || (DLedgerUtils.elapsed(lastCheckLeakTimeMs) > 1000)) {
-                    long peerWaterMark = getPeerWaterMark(term, peerId);
-                    for (Long index : pendingMap.keySet()) {
-                        if (index < peerWaterMark) {
-                            pendingMap.remove(index);
-                        }
+    //给从节点发送追加数据
+    private void doAppend() throws Exception {
+        while (true) {
+            if (!checkAndFreshState()) {
+                break;
+            }
+            if (type.get() != PushEntryRequest.Type.APPEND) {
+                break;
+            }
+            if (writeIndex > dLedgerStore.getLedgerEndIndex()) {
+                doCommit();
+                doCheckAppendResponse();
+                break;
+            }
+            if (pendingMap.size() >= maxPendingSize || (DLedgerUtils.elapsed(lastCheckLeakTimeMs) > 1000)) {
+                long peerWaterMark = getPeerWaterMark(term, peerId);
+                for (Long index : pendingMap.keySet()) {
+                    if (index < peerWaterMark) {
+                        pendingMap.remove(index);
                     }
-                    lastCheckLeakTimeMs = System.currentTimeMillis();
                 }
+                lastCheckLeakTimeMs = System.currentTimeMillis();
+            }
                 if (pendingMap.size() >= maxPendingSize) {
                     doCheckAppendResponse();
                     break;
@@ -582,6 +609,7 @@ public class DLedgerEntryPusher {
             }
         }
 
+        //向fllower发送数据清除请求
         private void doTruncate(long truncateIndex) throws Exception {
             PreConditions.check(type.get() == PushEntryRequest.Type.TRUNCATE, DLedgerResponseCode.UNKNOWN);
             DLedgerEntry truncateEntry = dLedgerStore.get(truncateIndex);
@@ -592,16 +620,19 @@ public class DLedgerEntryPusher {
             PreConditions.check(truncateResponse != null, DLedgerResponseCode.UNKNOWN, "truncateIndex=%d", truncateIndex);
             PreConditions.check(truncateResponse.getCode() == DLedgerResponseCode.SUCCESS.getCode(), DLedgerResponseCode.valueOf(truncateResponse.getCode()), "truncateIndex=%d", truncateIndex);
             lastPushCommitTimeMs = System.currentTimeMillis();
+            //改变当前的推送状态：append
             changeState(truncateIndex, PushEntryRequest.Type.APPEND);
         }
 
+        //更改推送状态
         private synchronized void changeState(long index, PushEntryRequest.Type target) {
             logger.info("[Push-{}]Change state from {} to {} at {}", peerId, type.get(), target, index);
             switch (target) {
                 case APPEND:
                     compareIndex = -1;
-                    updatePeerWaterMark(term, peerId, index);
-                    quorumAckChecker.wakeup();
+                    updatePeerWaterMark(term, peerId, index); //v
+                    quorumAckChecker.wakeup();// ?
+                    //从writeIndex开始给从节点复制数据
                     writeIndex = index + 1;
                     if (dLedgerConfig.isEnableBatchPush()) {
                         resetBatchAppendEntryRequest();
@@ -739,6 +770,7 @@ public class DLedgerEntryPusher {
     }
 
     /**
+     * Follower节点处理来自Leader节点的Push请求，保持集群内的数据一致性
      * This thread will be activated by the follower.
      * Accept the push request and order it by the index, then append to ledger store one by one.
      *
@@ -754,6 +786,7 @@ public class DLedgerEntryPusher {
             super("EntryHandler", logger);
         }
 
+        //从节点接收从leader节点收的的Push请求
         public CompletableFuture<PushEntryResponse> handlePush(PushEntryRequest request) throws Exception {
             //The timeout should smaller than the remoting layer's request timeout
             CompletableFuture<PushEntryResponse> future = new TimeoutFuture<>(1000);
@@ -790,6 +823,7 @@ public class DLedgerEntryPusher {
             return future;
         }
 
+        //构建返回给leader的响应
         private PushEntryResponse buildResponse(PushEntryRequest request, int code) {
             PushEntryResponse response = new PushEntryResponse();
             response.setGroup(request.getGroup());
@@ -814,6 +848,7 @@ public class DLedgerEntryPusher {
             return response;
         }
 
+        //追加消息到本地磁盘
         private void handleDoAppend(long writeIndex, PushEntryRequest request,
             CompletableFuture<PushEntryResponse> future) {
             try {
@@ -828,6 +863,7 @@ public class DLedgerEntryPusher {
             }
         }
 
+        //处理Leader发送的Compare请求
         private CompletableFuture<PushEntryResponse> handleDoCompare(long compareIndex, PushEntryRequest request,
             CompletableFuture<PushEntryResponse> future) {
             try {
@@ -843,6 +879,7 @@ public class DLedgerEntryPusher {
             return future;
         }
 
+        //处理Leader发送的DoCommit请求
         private CompletableFuture<PushEntryResponse> handleDoCommit(long committedIndex, PushEntryRequest request,
             CompletableFuture<PushEntryResponse> future) {
             try {
@@ -857,6 +894,7 @@ public class DLedgerEntryPusher {
             return future;
         }
 
+        //处理Leader发送的DoTruncate请求，清除与Leader不一致的数据
         private CompletableFuture<PushEntryResponse> handleDoTruncate(long truncateIndex, PushEntryRequest request,
             CompletableFuture<PushEntryResponse> future) {
             try {
@@ -893,7 +931,7 @@ public class DLedgerEntryPusher {
             long minFastForwardIndex = Long.MAX_VALUE;
             for (Pair<PushEntryRequest, CompletableFuture<PushEntryResponse>> pair : writeRequestMap.values()) {
                 long index = pair.getKey().getEntry().getIndex();
-                //Fall behind
+                //Fall behind leader发送的index小于follower节点的index
                 if (index <= endIndex) {
                     try {
                         DLedgerEntry local = dLedgerStore.get(index);
@@ -912,8 +950,8 @@ public class DLedgerEntryPusher {
                     //The next entry is coming, just return
                     return;
                 }
-                //Fast forward
-                TimeoutFuture<PushEntryResponse> future = (TimeoutFuture<PushEntryResponse>) pair.getValue();
+                //Fast forward leader发送数据太快，follower处理太慢
+                TimeoutFuture<PushEntryResponse> future  = (TimeoutFuture<PushEntryResponse>) pair.getValue();
                 if (!future.isTimeOut()) {
                     continue;
                 }
@@ -1020,7 +1058,7 @@ public class DLedgerEntryPusher {
                 } else {
                     long nextIndex = dLedgerStore.getLedgerEndIndex() + 1;
                     Pair<PushEntryRequest, CompletableFuture<PushEntryResponse>> pair = writeRequestMap.remove(nextIndex);
-                    if (pair == null) {
+                    if (pair == null) { //追加请求有误
                         checkAbnormalFuture(dLedgerStore.getLedgerEndIndex());
                         waitForRunning(1);
                         return;

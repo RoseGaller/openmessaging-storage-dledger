@@ -40,6 +40,7 @@ import org.slf4j.LoggerFactory;
 public class DLedgerClient {
 
     private static Logger logger = LoggerFactory.getLogger(DLedgerClient.class);
+    //同一组下的节点信息（eg:slfId->addr）
     private final Map<String, String> peerMap = new ConcurrentHashMap<>();
     private final String group;
     private String leaderId;

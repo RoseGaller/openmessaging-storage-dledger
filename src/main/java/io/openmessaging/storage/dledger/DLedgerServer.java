@@ -89,6 +89,7 @@ public class DLedgerServer implements DLedgerProtocolHander {
         this.dLedgerRpcService.startup();
         this.dLedgerEntryPusher.startup();
         this.dLedgerLeaderElector.startup();
+        //定时检测优先 Leader
         executorService.scheduleAtFixedRate(this::checkPreferredLeader, 1000, 1000, TimeUnit.MILLISECONDS);
     }
 
@@ -161,7 +162,7 @@ public class DLedgerServer implements DLedgerProtocolHander {
             PreConditions.check(memberState.isLeader(), DLedgerResponseCode.NOT_LEADER);
             PreConditions.check(memberState.getTransferee() == null, DLedgerResponseCode.LEADER_TRANSFERRING);
             long currTerm = memberState.currTerm();
-            if (dLedgerEntryPusher.isPendingFull(currTerm)) {
+            if (dLedgerEntryPusher.isPendingFull(currTerm)) { //限流，防止堆积过多的AppendEntryResponse
                 AppendEntryResponse appendEntryResponse = new AppendEntryResponse();
                 appendEntryResponse.setGroup(memberState.getGroup());
                 appendEntryResponse.setCode(DLedgerResponseCode.LEADER_PENDING_FULL.getCode());
@@ -171,7 +172,7 @@ public class DLedgerServer implements DLedgerProtocolHander {
             } else {
                 DLedgerEntry dLedgerEntry = new DLedgerEntry();
                 dLedgerEntry.setBody(request.getBody());
-                DLedgerEntry resEntry = dLedgerStore.appendAsLeader(dLedgerEntry);
+                DLedgerEntry resEntry = dLedgerStore.appendAsLeader(dLedgerEntry); //追加到本地磁盘
                 return dLedgerEntryPusher.waitAck(resEntry);
             }
         } catch (DLedgerException e) {
@@ -253,7 +254,7 @@ public class DLedgerServer implements DLedgerProtocolHander {
         try {
             PreConditions.check(memberState.getSelfId().equals(request.getRemoteId()), DLedgerResponseCode.UNKNOWN_MEMBER, "%s != %s", request.getRemoteId(), memberState.getSelfId());
             PreConditions.check(memberState.getGroup().equals(request.getGroup()), DLedgerResponseCode.UNKNOWN_GROUP, "%s != %s", request.getGroup(), memberState.getGroup());
-            if (memberState.getSelfId().equals(request.getTransferId())) {
+            if (memberState.getSelfId().equals(request.getTransferId())) { //当前的leader收到transfer command
                 //It's the leader received the transfer command.
                 PreConditions.check(memberState.isPeerMember(request.getTransfereeId()), DLedgerResponseCode.UNKNOWN_MEMBER, "transferee=%s is not a peer member", request.getTransfereeId());
                 PreConditions.check(memberState.currTerm() == request.getTerm(), DLedgerResponseCode.INCONSISTENT_TERM, "currTerm(%s) != request.term(%s)", memberState.currTerm(), request.getTerm());
@@ -264,7 +265,7 @@ public class DLedgerServer implements DLedgerProtocolHander {
                 PreConditions.check(transfereeFallBehind < dLedgerConfig.getMaxLeadershipTransferWaitIndex(),
                     DLedgerResponseCode.FALL_BEHIND_TOO_MUCH, "transferee fall behind too much, diff=%s", transfereeFallBehind);
                 return dLedgerLeaderElector.handleLeadershipTransfer(request);
-            } else if (memberState.getSelfId().equals(request.getTransfereeId())) {
+            } else if (memberState.getSelfId().equals(request.getTransfereeId())) { //优先leader节点收到leader的转让
                 // It's the transferee received the take leadership command.
                 PreConditions.check(request.getTransferId().equals(memberState.getLeaderId()), DLedgerResponseCode.INCONSISTENT_LEADER, "transfer=%s is not leader", request.getTransferId());
 

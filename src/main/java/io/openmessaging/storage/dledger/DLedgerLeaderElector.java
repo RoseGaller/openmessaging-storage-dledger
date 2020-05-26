@@ -207,8 +207,8 @@ public class DLedgerLeaderElector {
                 } else if (memberState.currVoteFor().equals(request.getLeaderId())) {
                     //repeat just let it go
                 } else {
-                    if (memberState.getLeaderId() != null) {
-                        return CompletableFuture.completedFuture(new VoteResponse(request).term(memberState.currTerm()).voteResult(VoteResponse.RESULT.REJECT_ALREADY_HAS_LEADER));
+                    if (memberState.getLeaderId() != null) {  // ？？？
+                        return CompletableFuture.completedFuture(new VoteResponse(request).term(memberState.currTerm()).voteResult(VoteResponse.RESULT.REJECT_ALREADY__HAS_LEADER));
                     } else {
                         return CompletableFuture.completedFuture(new VoteResponse(request).term(memberState.currTerm()).voteResult(VoteResponse.RESULT.REJECT_ALREADY_VOTED));
                     }
@@ -604,8 +604,8 @@ public class DLedgerLeaderElector {
         });
     }
 
-    public CompletableFuture<LeadershipTransferResponse> handleTakeLeadership(
-        LeadershipTransferRequest request) throws Exception {
+    //优先leader节点执行此方法，实现leader转让
+    public CompletableFuture<LeadershipTransferResponse> handleTakeLeadership(LeadershipTransferRequest request) throws Exception {
         logger.debug("handleTakeLeadership.request={}", request);
         synchronized (memberState) {
             if (memberState.currTerm() != request.getTerm()) {
@@ -701,5 +701,4 @@ public class DLedgerLeaderElector {
         }
 
     }
-
 }

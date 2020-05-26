@@ -46,11 +46,15 @@ public class MemberState {
     private final String peers;
     private volatile Role role = CANDIDATE;
     private volatile String leaderId;
+
     private volatile long currTerm = 0;
     private volatile String currVoteFor;
+
     private volatile long ledgerEndIndex = -1;
     private volatile long ledgerEndTerm = -1;
     private long knownMaxTermInGroup = -1;
+
+
     private Map<String, String> peerMap = new HashMap<>();
     private Map<String, Boolean> peersLiveTable = new ConcurrentHashMap<>();
 
@@ -91,7 +95,7 @@ public class MemberState {
         }
     }
 
-    private void persistTerm() {
+    private void persistTerm() {  //1、进行下次选举 2、设置currVoteFor
         try {
             Properties properties = new Properties();
             properties.put(TERM_PERSIST_KEY_TERM, currTerm);

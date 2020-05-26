@@ -22,6 +22,9 @@ import com.beust.jcommander.JCommander;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * 启动类
+ * */
 public class DLedger {
 
     private static Logger logger = LoggerFactory.getLogger(DLedger.class);
